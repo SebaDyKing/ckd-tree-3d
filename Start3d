@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+#
+# Start3d - compila y verifica la espiral 3D unidireccional.
+#
+#   ./Start3d                  verifica la espiral y compara tiempos UD contra BI
+#   ./Start3d 120              verifica sobre más capas (por defecto 40)
+#   ./Start3d pruebas [N]      muestra el detalle de cada prueba
+#   ./Start3d tiempo           solo la tabla de tiempos
+#   ./Start3d dac              detalle de las pruebas del DAC de 64 bits
+#   ./Start3d arbol [R] [n]    pruebas del árbol 3D y benchmark UD/BI/iKd-tree por espacio L³
+#                              (R repeticiones, por defecto 5; n puntos por espacio, por defecto 10^5)
+#   ./Start3d original [R]     contra Silva Pereira: BI + dacs.c (Silva) y UD + Dac64 (tesis)
+#   K3TREE=ruta ./Start3d k3 [R]
+#                              contra el k3-tree de Silva-Coira (gitlab.lbd.udc.es/lbd-open/k3-tree),
+#                              ya compilado en ruta con su compile.sh
+#   ./Start3d compilar         solo compila y deja los binarios listos
+#
+# src/Spiral3dUD.hpp        espiral unidireccional (semiespacio)
+# src/Dac64.hpp             DAC de 64 bits, se compara contra ref/cKDtreeUD/dacs.c
+# src/cKDtree3d.hpp         kd-tree 3D compacto sobre el Dac64, espiral UD o BI
+
+set -euo pipefail
+
+RAIZ="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUILD="$RAIZ/build"
+LOG="$BUILD/compilacion3d.log"
+
+mkdir -p "$BUILD"
+: > "$LOG"
+
+echo "==> Compilando (salida completa del compilador en $LOG)"
+if ! g++ -O2 -Wall -Wextra -I "$RAIZ/src" \
+        -o "$BUILD/spiral3dud_verify" "$RAIZ/test/Spiral3dUD_verify.cpp" >> "$LOG" 2>&1; then
+    echo "    ERROR AL COMPILAR:"; tail -25 "$LOG"; exit 1
+fi
+echo "    spiral3dud_verify (dominio espiral unidireccional)      OK"
+
+if ! g++ -O2 -Wall -Wextra -I "$RAIZ/src" \
+        -o "$BUILD/spiral3d_bench" "$RAIZ/test/Spiral3d_bench.cpp" >> "$LOG" 2>&1; then
+    echo "    ERROR AL COMPILAR:"; tail -25 "$LOG"; exit 1
+fi
+echo "    spiral3d_bench   (tiempos UD contra BI)                 OK"
+
+#el DAC de 32 bits de referencia es C; sus objetos van a un directorio temporal
+OBJ="$(mktemp -d)"
+trap 'rm -rf "$OBJ"' EXIT
+for f in basics bitrankw32int dacs; do
+    if ! cc -O2 -w -c "$RAIZ/ref/cKDtreeUD/$f.c" -o "$OBJ/$f.o" >> "$LOG" 2>&1; then
+        echo "    ERROR AL COMPILAR:"; tail -25 "$LOG"; exit 1
+    fi
+done
+if ! g++ -O2 -Wall -Wextra -I "$RAIZ/src" -isystem "$RAIZ/ref/cKDtreeUD" -o "$BUILD/dac64_verify" \
+        "$RAIZ/test/Dac64_verify.cpp" "$OBJ"/*.o -lm >> "$LOG" 2>&1; then
+    echo "    ERROR AL COMPILAR:"; tail -25 "$LOG"; exit 1
+fi
+echo "    dac64_verify     (DAC de 64 bits contra dacs.c)         OK"
+
+if ! g++ -O2 -Wall -Wextra -I "$RAIZ/src" \
+        -o "$BUILD/ckdtree3d_verify" "$RAIZ/test/cKDtree3d_verify.cpp" >> "$LOG" 2>&1; then
+    echo "    ERROR AL COMPILAR:"; tail -25 "$LOG"; exit 1
+fi
+echo "    ckdtree3d_verify (kd-tree 3D compacto, UD y BI)         OK"
+
+if ! g++ -O2 -Wall -Wextra -I "$RAIZ/src" \
+        -o "$BUILD/ckdtree3d_bench" "$RAIZ/test/cKDtree3d_bench.cpp" >> "$LOG" 2>&1; then
+    echo "    ERROR AL COMPILAR:"; tail -25 "$LOG"; exit 1
+fi
+echo "    ckdtree3d_bench  (árbol UD contra BI y el iKd-tree)     OK"
+
+if ! g++ -O2 -Wall -Wextra -I "$RAIZ/src" -isystem "$RAIZ/ref/cKDtreeUD" -o "$BUILD/ckdtree3d_dacs_bench" \
+        "$RAIZ/test/cKDtree3d_dacs_bench.cpp" "$OBJ"/*.o -lm >> "$LOG" 2>&1; then
+    echo "    ERROR AL COMPILAR:"; tail -25 "$LOG"; exit 1
+fi
+echo "    ckdtree3d_dacs_bench (contra Silva Pereira, 32 bits)   OK"
+
+case "${1:-}" in
+    compilar)
+        echo
+        echo "    binarios listos en $BUILD"
+        exit 0
+        ;;
+    pruebas)
+        echo
+        exec "$BUILD/spiral3dud_verify" "${2:-40}"
+        ;;
+    tiempo)
+        echo
+        exec "$BUILD/spiral3d_bench"
+        ;;
+    dac)
+        echo
+        exec "$BUILD/dac64_verify"
+        ;;
+    arbol)
+        echo
+        "$BUILD/ckdtree3d_verify"
+        exec "$BUILD/ckdtree3d_bench" "${2:-5}" "${3:-100000}"
+        ;;
+    original)
+        echo
+        exec "$BUILD/ckdtree3d_dacs_bench" "${2:-5}"
+        ;;
+    k3)
+        K3="${K3TREE:?indica la carpeta del k3-tree compilado: K3TREE=/ruta/k3-tree ./Start3d k3}"
+        if ! g++ -O2 -DNDEBUG -Wall -Wextra -I "$RAIZ/src" -isystem "$K3/include" \
+                -isystem "$K3/build/external/sdsl-lite/include" -o "$BUILD/ckdtree3d_k3_bench" \
+                "$RAIZ/test/cKDtree3d_k3_bench.cpp" "$K3/build/lib/libsdsl.a" >> "$LOG" 2>&1; then
+            echo "    ERROR AL COMPILAR:"; tail -25 "$LOG"; exit 1
+        fi
+        echo "    ckdtree3d_k3_bench (contra el k3-tree, sdsl-lite)      OK"
+        echo
+        exec "$BUILD/ckdtree3d_k3_bench" "${2:-5}"
+        ;;
+esac
+
+#las pruebas se resumen en una línea; si alguna falla se muestra todo
+echo
+if ! SALIDA="$("$BUILD/spiral3dud_verify" "${1:-40}")"; then
+    echo "$SALIDA"; exit 1
+fi
+echo "==> Pruebas: $(grep -c '\[OK' <<< "$SALIDA") de $(grep -c '^ *\[' <<< "$SALIDA") OK, capas 1..${1:-40} (detalle: ./Start3d pruebas)"
+if ! SALIDA="$("$BUILD/dac64_verify")"; then
+    echo "$SALIDA"; exit 1
+fi
+echo "==> DAC 64: $(grep -c '\[OK' <<< "$SALIDA") de $(grep -c '^ *\[' <<< "$SALIDA") OK (detalle: ./Start3d dac)"
+if ! SALIDA="$("$BUILD/ckdtree3d_verify")"; then
+    echo "$SALIDA"; exit 1
+fi
+echo "==> Árbol 3D: $(grep -c '\[OK' <<< "$SALIDA") de $(grep -c '^ *\[' <<< "$SALIDA") OK (benchmark: ./Start3d arbol)"
+echo
+"$BUILD/spiral3d_bench"
